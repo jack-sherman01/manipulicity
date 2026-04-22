@@ -70,6 +70,10 @@ USER_PROMPT = (
     "The object is being grasped or is hanging from a robot end-effector."
 )
 
+# Default local model served via Ollama (most capable open vision model as of 2025).
+# Alternatives: "llama3.2-vision:90b" (largest), "qwen2.5vl:72b" (comparable).
+_DEFAULT_LOCAL_MODEL = "llama3.2-vision:11b"
+
 
 # ---------------------------------------------------------------------------
 # Helper: image → base64 PNG
@@ -120,7 +124,16 @@ class MassEstimator:
         OpenAI API key.  Falls back to the ``OPENAI_API_KEY`` environment
         variable when not supplied.
     model : str
-        OpenAI vision model to use.  Defaults to ``"gpt-4o-mini"``.
+        Model to use.  Prefix with ``ollama/`` to route to a local server
+        (e.g. ``"ollama/llama3.2-vision:11b"``).  Defaults to ``"gpt-4o-mini"``.
+    gemini_api_key : str, optional
+        Google API key for Gemini models.  Falls back to the
+        ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY`` environment variables.
+    local_base_url : str, optional
+        Base URL of a local OpenAI-compatible VLM server (e.g. Ollama at
+        ``http://localhost:11434/v1``).  Falls back to the
+        ``LOCAL_VLM_BASE_URL`` environment variable, then
+        ``http://localhost:11434/v1``.
     """
 
     def __init__(
@@ -128,9 +141,17 @@ class MassEstimator:
         api_key: Optional[str] = None,
         model: str = "gpt-4o-mini",
         gemini_api_key: Optional[str] = None,
+        local_base_url: Optional[str] = None,
     ) -> None:
         self.model = model
-        self._provider = "gemini" if model.lower().startswith("gemini") else "openai"
+
+        _model_lower = model.lower()
+        if _model_lower.startswith("gemini"):
+            self._provider = "gemini"
+        elif _model_lower.startswith("ollama/") or local_base_url or os.environ.get("LOCAL_VLM_BASE_URL"):
+            self._provider = "local"
+        else:
+            self._provider = "openai"
 
         if self._provider == "openai":
             resolved_key = api_key or os.environ.get("OPENAI_API_KEY")
@@ -159,6 +180,16 @@ class MassEstimator:
                     "environment variable."
                 )
             genai.configure(api_key=resolved_key)
+        else:  # local
+            resolved_url = (
+                local_base_url
+                or os.environ.get("LOCAL_VLM_BASE_URL")
+                or "http://localhost:11434/v1"
+            )
+            # Strip provider prefix (e.g. "ollama/llama3.2-vision:90b" → "llama3.2-vision:90b")
+            self._local_model = model.split("/", 1)[1] if "/" in model else _DEFAULT_LOCAL_MODEL
+            # Ollama requires a non-empty api_key string; any value works
+            self._client = OpenAI(api_key="ollama", base_url=resolved_url)
 
     # ------------------------------------------------------------------
     # Public interface
@@ -199,6 +230,8 @@ class MassEstimator:
         """Route the image to the appropriate VLM and return the raw text response."""
         if self._provider == "gemini":
             return self._query_gemini(image_b64)
+        if self._provider == "local":
+            return self._query_local(image_b64)
         return self._query_openai(image_b64)
 
     def _query_openai(self, image_b64: str) -> str:
@@ -215,6 +248,30 @@ class MassEstimator:
                             "image_url": {
                                 "url": f"data:image/png;base64,{image_b64}",
                                 "detail": "high",
+                            },
+                        },
+                        {"type": "text", "text": USER_PROMPT},
+                    ],
+                },
+            ],
+            max_tokens=512,
+            temperature=0.0,
+        )
+        return response.choices[0].message.content.strip()
+
+    def _query_local(self, image_b64: str) -> str:
+        """Send the image to a local OpenAI-compatible VLM server (e.g. Ollama)."""
+        response = self._client.chat.completions.create(
+            model=self._local_model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{image_b64}",
                             },
                         },
                         {"type": "text", "text": USER_PROMPT},
@@ -305,6 +362,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="OpenAI API key (falls back to OPENAI_API_KEY env var).",
     )
     parser.add_argument(
+        "--local_base_url",
+        default=None,
+        help=(
+            "Base URL of a local OpenAI-compatible VLM server, e.g. "
+            "http://localhost:11434/v1 for Ollama (falls back to "
+            "LOCAL_VLM_BASE_URL env var, then http://localhost:11434/v1). "
+            "Prefix the model name with 'ollama/' to auto-select this provider."
+        ),
+    )
+    parser.add_argument(
         "--gemini_api_key",
         default=None,
         help=(
@@ -316,8 +383,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--model",
         default="gpt-4o-mini",
         help=(
-            "VLM to use: an OpenAI model (e.g. gpt-4o-mini, gpt-4o) or a "
-            "Gemini model (e.g. gemini-1.5-flash, gemini-1.5-pro). "
+            "VLM to use: an OpenAI model (e.g. gpt-4o-mini, gpt-4o), a "
+            "Gemini model (e.g. gemini-1.5-flash, gemini-1.5-pro), or a "
+            "local model prefixed with 'ollama/' "
+            "(e.g. ollama/llama3.2-vision:11b [recommended], "
+            "ollama/llama3.2-vision:90b, ollama/qwen2.5vl:72b). "
             "Provider is auto-detected from the model name. "
             "Default: gpt-4o-mini."
         ),
@@ -332,6 +402,7 @@ def main() -> None:
         api_key=args.api_key,
         model=args.model,
         gemini_api_key=args.gemini_api_key,
+        local_base_url=args.local_base_url,
     )
 
     print(f"[MassEstimator] Querying {args.model} with image: {args.image}")
