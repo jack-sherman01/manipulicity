@@ -19,11 +19,17 @@ import io
 import json
 import os
 import re
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
 from openai import OpenAI
 from PIL import Image
+
+try:
+    import google.generativeai as genai
+    _GEMINI_AVAILABLE = True
+except ImportError:
+    _GEMINI_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -121,15 +127,38 @@ class MassEstimator:
         self,
         api_key: Optional[str] = None,
         model: str = "gpt-4o-mini",
+        gemini_api_key: Optional[str] = None,
     ) -> None:
-        resolved_key = api_key or os.environ.get("OPENAI_API_KEY")
-        if not resolved_key:
-            raise ValueError(
-                "An OpenAI API key is required. Pass it via the `api_key` "
-                "argument or set the OPENAI_API_KEY environment variable."
-            )
-        self._client = OpenAI(api_key=resolved_key)
         self.model = model
+        self._provider = "gemini" if model.lower().startswith("gemini") else "openai"
+
+        if self._provider == "openai":
+            resolved_key = api_key or os.environ.get("OPENAI_API_KEY")
+            if not resolved_key:
+                raise ValueError(
+                    "An OpenAI API key is required. Pass it via the `api_key` "
+                    "argument or set the OPENAI_API_KEY environment variable."
+                )
+            self._client = OpenAI(api_key=resolved_key)
+        else:
+            if not _GEMINI_AVAILABLE:
+                raise ImportError(
+                    "google-generativeai is required for Gemini models. "
+                    "Install it with: pip install google-generativeai"
+                )
+            resolved_key = (
+                gemini_api_key
+                or api_key
+                or os.environ.get("GEMINI_API_KEY")
+                or os.environ.get("GOOGLE_API_KEY")
+            )
+            if not resolved_key:
+                raise ValueError(
+                    "A Google API key is required for Gemini models. Pass it via "
+                    "the `gemini_api_key` argument or set the GEMINI_API_KEY "
+                    "environment variable."
+                )
+            genai.configure(api_key=resolved_key)
 
     # ------------------------------------------------------------------
     # Public interface
@@ -167,7 +196,13 @@ class MassEstimator:
     # ------------------------------------------------------------------
 
     def _query_vlm(self, image_b64: str) -> str:
-        """Send the image to the VLM and return the raw text response."""
+        """Route the image to the appropriate VLM and return the raw text response."""
+        if self._provider == "gemini":
+            return self._query_gemini(image_b64)
+        return self._query_openai(image_b64)
+
+    def _query_openai(self, image_b64: str) -> str:
+        """Send the image to OpenAI and return the raw text response."""
         response = self._client.chat.completions.create(
             model=self.model,
             messages=[
@@ -190,6 +225,23 @@ class MassEstimator:
             temperature=0.0,
         )
         return response.choices[0].message.content.strip()
+
+    def _query_gemini(self, image_b64: str) -> str:
+        """Send the image to Google Gemini and return the raw text response."""
+        model_obj = genai.GenerativeModel(
+            self.model,
+            system_instruction=SYSTEM_PROMPT,
+        )
+        image_bytes = base64.b64decode(image_b64)
+        pil_img = Image.open(io.BytesIO(image_bytes))
+        response = model_obj.generate_content(
+            [USER_PROMPT, pil_img],
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.0,
+                max_output_tokens=512,
+            ),
+        )
+        return response.text.strip()
 
     @staticmethod
     def _parse_response(text: str) -> dict:
@@ -253,9 +305,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="OpenAI API key (falls back to OPENAI_API_KEY env var).",
     )
     parser.add_argument(
+        "--gemini_api_key",
+        default=None,
+        help=(
+            "Google API key for Gemini models "
+            "(falls back to GEMINI_API_KEY or GOOGLE_API_KEY env var)."
+        ),
+    )
+    parser.add_argument(
         "--model",
         default="gpt-4o-mini",
-        help="OpenAI vision model to use (default: gpt-4o-mini).",
+        help=(
+            "VLM to use: an OpenAI model (e.g. gpt-4o-mini, gpt-4o) or a "
+            "Gemini model (e.g. gemini-1.5-flash, gemini-1.5-pro). "
+            "Provider is auto-detected from the model name. "
+            "Default: gpt-4o-mini."
+        ),
     )
     return parser
 
@@ -263,7 +328,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = _build_arg_parser().parse_args()
 
-    estimator = MassEstimator(api_key=args.api_key, model=args.model)
+    estimator = MassEstimator(
+        api_key=args.api_key,
+        model=args.model,
+        gemini_api_key=args.gemini_api_key,
+    )
 
     print(f"[MassEstimator] Querying {args.model} with image: {args.image}")
     result = estimator.estimate(args.image)
