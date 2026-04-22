@@ -177,7 +177,7 @@ class MassEstimator:
                     "argument or set the OPENAI_API_KEY environment variable."
                 )
             self._client = OpenAI(api_key=resolved_key)
-        else:
+        elif self._provider == "gemini":
             if not _GEMINI_AVAILABLE:
                 raise ImportError(
                     "google-generativeai is required for Gemini models. "
