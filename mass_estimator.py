@@ -44,25 +44,41 @@ Given an image that shows an object grasped by a robot gripper, or hanging \
 from a robotic end-effector, your task is to estimate the **mass** of that \
 object in kilograms.
 
-Reason step-by-step, considering:
-1. The visible size and shape of the object.
-2. The likely material (metal, plastic, wood, food, fabric, etc.) judged from \
-   colour, texture, and context.
-3. Typical real-world densities and dimensions for objects of that class.
-4. Any scale references visible in the image (robot links, gripper fingers, \
-   background objects).
+## Step 1 — Chain-of-Thought Reasoning (write this out freely)
 
-After reasoning, output ONLY valid JSON with exactly these keys:
-{
+Think through each of the following considerations explicitly before committing
+to a number.  Write your reasoning in plain prose; do not skip any step:
+
+1. **Object identity & description** – What is the object?  Describe its shape,
+   size relative to the gripper/end-effector, and any distinguishing features.
+2. **Material inference** – What material(s) is it likely made of (metal, plastic,
+   wood, food, fabric, glass, etc.)?  Justify from colour, texture, sheen, and
+   context clues visible in the image.
+3. **Dimensional estimation** – Estimate the object's approximate dimensions
+   (length × width × height or diameter × height) using the robot hardware as a
+   scale reference.  State your scale assumptions explicitly.
+4. **Mass calculation** – Using your estimated volume and a plausible density
+   for the inferred material, compute an approximate mass.  Show the arithmetic.
+5. **Sanity check** – Does the result feel physically reasonable for an object
+   of that type?  Adjust and explain if needed.
+6. **Uncertainty** – Note what makes this estimate uncertain and give a lower /
+   upper bound.
+
+## Step 2 — Structured Output
+
+After your reasoning, output a JSON block (fenced with ```json ... ```) with
+exactly these keys and no extra text outside the fences:
+
+```json
+{{
   "mass_kg": <float>,
   "mass_kg_range": [<float_lower>, <float_upper>],
   "material_guess": "<string>",
   "object_description": "<string>",
   "confidence": "<low|medium|high>",
-  "reasoning": "<concise explanation>"
-}
-
-Do not output anything outside the JSON block.
+  "reasoning": "<one-sentence summary of your reasoning>"
+}}
+```
 """
 
 USER_PROMPT = (
@@ -254,7 +270,7 @@ class MassEstimator:
                     ],
                 },
             ],
-            max_tokens=512,
+            max_tokens=2048,
             temperature=0.0,
         )
         return response.choices[0].message.content.strip()
@@ -278,7 +294,7 @@ class MassEstimator:
                     ],
                 },
             ],
-            max_tokens=512,
+            max_tokens=2048,
             temperature=0.0,
         )
         return response.choices[0].message.content.strip()
@@ -295,7 +311,7 @@ class MassEstimator:
             [USER_PROMPT, pil_img],
             generation_config=genai.types.GenerationConfig(
                 temperature=0.0,
-                max_output_tokens=512,
+                max_output_tokens=2048,
             ),
         )
         return response.text.strip()
@@ -303,19 +319,26 @@ class MassEstimator:
     @staticmethod
     def _parse_response(text: str) -> dict:
         """
-        Parse the VLM's JSON response, tolerating minor formatting issues
-        (e.g. markdown code fences).
+        Parse the VLM's response, which may contain free-form CoT reasoning
+        followed by a JSON block (fenced or bare).  Extracts the JSON object
+        and validates required keys.
         """
-        # Strip markdown code fences if present
-        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
-        text = re.sub(r"\s*```$", "", text, flags=re.MULTILINE)
+        # 1. Try to extract a fenced ```json ... ``` block first
+        fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        candidate = fenced.group(1).strip() if fenced else text
+
+        # 2. If no fence found, fall back to the last {...} object in the text
+        if not fenced:
+            brace_match = list(re.finditer(r"\{[\s\S]*\}", candidate))
+            if brace_match:
+                candidate = brace_match[-1].group(0)
 
         try:
-            data = json.loads(text)
+            data = json.loads(candidate)
         except json.JSONDecodeError as exc:
             raise ValueError(
                 f"VLM did not return valid JSON.\n"
-                f"Raw response:\n{text}\n"
+                f"Extracted candidate:\n{candidate}\n"
                 f"JSON error: {exc}"
             ) from exc
 
