@@ -27,6 +27,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import Optional
 
 from mass_estimator import MassEstimator
 
@@ -73,7 +74,7 @@ def _print_result(idx: int, total: int, image_path: Path, result: dict, elapsed:
 
 def _print_summary(
     records: list[dict],
-    ground_truth: dict[str, float] | None,
+    ground_truth: Optional[dict[str, float]],
 ) -> None:
     _print_separator("=")
     print("SUMMARY")
@@ -195,7 +196,7 @@ def main() -> None:
     args = _build_arg_parser().parse_args()
 
     # Load ground truth if provided
-    ground_truth: dict[str, float] | None = None
+    ground_truth: Optional[dict[str, float]] = None
     if args.ground_truth:
         with open(args.ground_truth, "r", encoding="utf-8") as f:
             ground_truth = json.load(f)
