@@ -60,13 +60,31 @@ def _print_separator(char: str = "-", width: int = 72) -> None:
 def _print_result(idx: int, total: int, image_path: Path, result: dict, elapsed: float) -> None:
     _print_separator()
     print(f"[{idx}/{total}]  {image_path.name}")
-    print(f"  Object       : {result['object_description']}")
-    print(f"  Material     : {result['material_guess']}")
-    print(f"  Mass         : {result['mass_kg']:.4f} kg")
-    print(
-        f"  Range        : [{result['mass_kg_range'][0]:.4f}, "
-        f"{result['mass_kg_range'][1]:.4f}] kg"
-    )
+    objects = result.get("objects", [])
+    if len(objects) > 1:
+        print(f"  Objects found: {len(objects)}")
+        for i, obj in enumerate(objects, start=1):
+            occluded = " [occluded]" if obj.get("occluded") else ""
+            print(f"  [{i}] {obj['object_description']}{occluded}")
+            print(f"       Material : {obj['material_guess']}")
+            print(
+                f"       Mass     : {obj['mass_kg']:.4f} kg  "
+                f"[{obj['mass_kg_range'][0]:.4f}, {obj['mass_kg_range'][1]:.4f}]  "
+                f"({obj['confidence']})"
+            )
+        print(f"  Total Mass   : {result['mass_kg']:.4f} kg")
+        print(
+            f"  Total Range  : [{result['mass_kg_range'][0]:.4f}, "
+            f"{result['mass_kg_range'][1]:.4f}] kg"
+        )
+    else:
+        print(f"  Object       : {result['object_description']}")
+        print(f"  Material     : {result['material_guess']}")
+        print(f"  Mass         : {result['mass_kg']:.4f} kg")
+        print(
+            f"  Range        : [{result['mass_kg_range'][0]:.4f}, "
+            f"{result['mass_kg_range'][1]:.4f}] kg"
+        )
     print(f"  Confidence   : {result['confidence']}")
     print(f"  Reasoning    : {result['reasoning']}")
     print(f"  Time         : {elapsed:.2f} s")

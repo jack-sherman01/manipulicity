@@ -41,50 +41,66 @@ SYSTEM_PROMPT = """\
 You are a robotics perception expert specialising in estimating the physical \
 properties of objects from visual information.
 
-Given an image that shows an object grasped by a robot gripper, or hanging \
-from a robotic end-effector, your task is to estimate the **mass** of that \
-object in kilograms.
+Given an image, your task is to identify and estimate the **mass** of \
+**every distinct object** visible in the scene, then report a combined total.
 
-## Step 1 — Chain-of-Thought Reasoning (write this out freely)
+## Important rules before you begin:
+- **Count ALL objects** in the image, not just the one being grasped or held.
+- **Look for overlapping / partially occluded objects.** Objects may be stacked,
+  tucked behind one another, or only partially visible. Reason about what is
+  hidden and include those objects in your count.
+- If the same object appears multiple times, count each instance separately.
+- If an object is a container that appears to hold contents (e.g. a filled
+  bottle or bag), estimate the mass of the container plus its contents.
 
-Think through each of the following considerations explicitly before committing
-to a number.  Write your reasoning in plain prose; do not skip any step:
+## Step 1 — Chain-of-Thought Reasoning:
 
-1. **Object identity & description** – What is the object?  Describe its shape,
-   size relative to the gripper/end-effector, and any distinguishing features.
-2. **Material inference** – What material(s) is it likely made of (metal, plastic,
-   wood, food, fabric, glass, etc.)?  Justify from colour, texture, sheen, and
-   context clues visible in the image.
-3. **Dimensional estimation** – Estimate the object's approximate dimensions
-   (length × width × height or diameter × height) using the robot hardware as a
-   scale reference.  State your scale assumptions explicitly.
-4. **Mass calculation** – Using your estimated volume and a plausible density
-   for the inferred material, compute an approximate mass.  Show the arithmetic.
-5. **Sanity check** – Does the result feel physically reasonable for an object
-   of that type?  Adjust and explain if needed.
-6. **Uncertainty** – Note what makes this estimate uncertain and give a lower /
-   upper bound.
+For **each object** you identify (including partially hidden ones), work through:
+1. **Object identity & description** – What is it?  Describe its shape, size
+   relative to any scale reference (gripper, table, other known objects), and
+   any distinguishing features.  Note if it is partially occluded.
+2. **Material inference** – What material(s) is it likely made of (metal,
+   plastic, wood, food, fabric, glass, etc.)?  Justify from colour, texture,
+   sheen, and context clues.
+3. **Dimensional estimation** – Estimate approximate dimensions using any
+   available scale reference.  State your assumptions explicitly.
+4. **Mass calculation** – Estimated volume × plausible density.  Show arithmetic.
+5. **Sanity check** – Is the result physically reasonable?  Adjust if needed.
+6. **Uncertainty** – What makes this estimate uncertain?  Give lower/upper bounds.
+
+After reasoning about every individual object, sum their masses to get the
+**total mass** and derive a combined uncertainty range.
 
 ## Step 2 — Structured Output
-
-After your reasoning, output a JSON block (fenced with ```json ... ```) with
-exactly these keys and no extra text outside the fences:
+After your reasoning, output a single JSON block (fenced with ```json ... ```).
+Do not include any text outside the fences.
 
 ```json
 {{
-  "mass_kg": <float>,
-  "mass_kg_range": [<float_lower>, <float_upper>],
-  "material_guess": "<string>",
-  "object_description": "<string>",
-  "confidence": "<low|medium|high>",
-  "reasoning": "<one-sentence summary of your reasoning>"
+  "objects": [
+    {{
+      "object_description": "<string>",
+      "material_guess": "<string>",
+      "mass_kg": <float>,
+      "mass_kg_range": [<float_lower>, <float_upper>],
+      "confidence": "<low|medium|high>",
+      "occluded": <true|false>
+    }}
+  ],
+  "total_mass_kg": <float>,
+  "total_mass_kg_range": [<float_lower>, <float_upper>],
+  "overall_confidence": "<low|medium|high>",
+  "reasoning": "<one-sentence summary covering all objects>"
 }}
 ```
 """
 
 USER_PROMPT = (
-    "Please estimate the mass of the object shown in this image. "
-    "The object is being grasped or is hanging from a robot end-effector."
+    "Please estimate the mass of every object visible in this image, "
+    "including any that are partially overlapping or occluded. "
+    "Sum their individual masses to produce a total. "
+    "Some objects may be grasped or hanging from a robot end-effector, "
+    "but make sure to count all other objects in the scene as well."
 )
 
 # Default local model served via Ollama (most capable open vision model as of 2025).
@@ -323,6 +339,9 @@ class MassEstimator:
         Parse the VLM's response, which may contain free-form CoT reasoning
         followed by a JSON block (fenced or bare).  Extracts the JSON object
         and validates required keys.
+
+        Returns a dict with flat top-level keys (for backward compatibility)
+        plus an ``objects`` list with per-object details.
         """
         # 1. Try to extract a fenced ```json ... ``` block first
         fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
@@ -343,6 +362,29 @@ class MassEstimator:
                 f"JSON error: {exc}"
             ) from exc
 
+        # --- Handle new multi-object schema ---
+        if "objects" in data:
+            objects = data["objects"]
+            for obj in objects:
+                obj["mass_kg"] = float(obj["mass_kg"])
+                obj["mass_kg_range"] = [float(v) for v in obj["mass_kg_range"]]
+            # Always compute total by summing individual objects (don't trust model arithmetic)
+            total_mass = sum(o["mass_kg"] for o in objects)
+            total_lower = sum(o["mass_kg_range"][0] for o in objects)
+            total_upper = sum(o["mass_kg_range"][1] for o in objects)
+            descriptions = "; ".join(o["object_description"] for o in objects)
+            materials = "; ".join(o["material_guess"] for o in objects)
+            return {
+                "objects": objects,
+                "object_description": descriptions,
+                "material_guess": materials,
+                "mass_kg": round(total_mass, 4),
+                "mass_kg_range": [round(total_lower, 4), round(total_upper, 4)],
+                "confidence": data.get("overall_confidence", "medium"),
+                "reasoning": data.get("reasoning", ""),
+            }
+
+        # --- Fallback: legacy single-object schema ---
         required_keys = {
             "mass_kg",
             "mass_kg_range",
@@ -357,10 +399,16 @@ class MassEstimator:
                 f"VLM response is missing required keys: {missing}\n"
                 f"Raw response:\n{text}"
             )
-
-        # Coerce numeric types for safety
         data["mass_kg"] = float(data["mass_kg"])
         data["mass_kg_range"] = [float(v) for v in data["mass_kg_range"]]
+        data.setdefault("objects", [{
+            "object_description": data["object_description"],
+            "material_guess": data["material_guess"],
+            "mass_kg": data["mass_kg"],
+            "mass_kg_range": data["mass_kg_range"],
+            "confidence": data["confidence"],
+            "occluded": False,
+        }])
         return data
 
 
