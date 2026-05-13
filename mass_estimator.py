@@ -26,7 +26,8 @@ from openai import OpenAI
 from PIL import Image
 
 try:
-    import google.generativeai as genai
+    from google import genai as _genai
+    from google.genai import types as _genai_types
     _GEMINI_AVAILABLE = True
 except ImportError:
     _GEMINI_AVAILABLE = False
@@ -195,7 +196,7 @@ class MassEstimator:
                     "the `gemini_api_key` argument or set the GEMINI_API_KEY "
                     "environment variable."
                 )
-            genai.configure(api_key=resolved_key)
+            self._gemini_client = _genai.Client(api_key=resolved_key)
         else:  # local
             resolved_url = (
                 local_base_url
@@ -301,17 +302,17 @@ class MassEstimator:
 
     def _query_gemini(self, image_b64: str) -> str:
         """Send the image to Google Gemini and return the raw text response."""
-        model_obj = genai.GenerativeModel(
-            self.model,
-            system_instruction=SYSTEM_PROMPT,
-        )
         image_bytes = base64.b64decode(image_b64)
-        pil_img = Image.open(io.BytesIO(image_bytes))
-        response = model_obj.generate_content(
-            [USER_PROMPT, pil_img],
-            generation_config=genai.types.GenerationConfig(
+        response = self._gemini_client.models.generate_content(
+            model=self.model,
+            contents=[
+                _genai_types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                USER_PROMPT,
+            ],
+            config=_genai_types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
                 temperature=0.0,
-                max_output_tokens=2048,
+                max_output_tokens=8192,
             ),
         )
         return response.text.strip()
